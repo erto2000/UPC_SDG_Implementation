@@ -31,14 +31,16 @@ class SecureLightGCN(nn.Module):
     # interacted_item_indices: tensor of interacted item indices, shape: (batch_size, num_items)
     # privacy_preferences: tensor of privacy preferences, shape: (batch_size)
     # mask: tensor of mask for padding, shape: (batch_size, num_items
-    # Returns user_emb, item_emb, attention_probabilities, replacement_item_embeddings
+    # Returns user_emb, item_emb, item_emb_distances, attention_probabilities, replacement_item_embeddings
     def forward(self, user_indices, interacted_item_indices, privacy_preferences, mask=None):
         # SELECTION MODULE
         # Get initial embeddings
         user_emb = self.user_embedding(user_indices)  # shape: (batch_size, embedding_dim)
         item_emb = self.item_embedding(interacted_item_indices)  # shape: (batch_size, num_items, embedding_dim)
 
-        # No need to duplicate user_emb as broadcasting will handle it in operations
+        # Calculate item distances (cosine similarity of item_emb with every other item embeddings)
+        item_emb_distances = torch.matmul(item_emb, self.item_embedding.weight.T)  # shape: (batch_size, num_items, num_all_items)
+
         # Combine user_emb with each item_emb
         user_emb_expanded = user_emb.unsqueeze(1)  # Add 1 to the middle for broadcasting, shape: (batch_size, 1, embedding_dim)
         combined_emb = torch.cat((user_emb_expanded.expand_as(item_emb), item_emb), dim=2)  # shape: (batch_size, num_items, 2*embedding_dim)
@@ -66,16 +68,14 @@ class SecureLightGCN(nn.Module):
         similarity_score = torch.matmul(latent_feature, self.item_embedding.weight.T)  # shape: (batch_size, num_items, num_all_items)
 
         # Suppress the similarity score of interacted items
-        mask = torch.zeros_like(similarity_score)
-        for batch_idx, indices in enumerate(interacted_item_indices):
-            mask[batch_idx, :, indices] = -float('inf')
-        similarity_score = similarity_score + mask
+        item_mask = torch.zeros_like(similarity_score)
+        for batch_idx, (indices, indices_mask) in enumerate(zip(interacted_item_indices, mask)):
+            indices = indices[indices_mask]
+            item_mask[batch_idx, :, indices] = -float('inf')
+        similarity_score = similarity_score + item_mask
 
         # Most similar item selection (Item generation)
         hard_similarity_score = F.gumbel_softmax(similarity_score, dim=-1, hard=True)  # shape: (batch_size, num_items, num_all_items)
         replacement_item_embeddings = torch.matmul(hard_similarity_score, self.item_embedding.weight)  # shape: (batch_size, num_items, embedding_dim)
 
-        # Calculate item distances
-        item_emb_distances = torch.matmul(item_emb, self.item_embedding.weight.T)  # shape: (batch_size, num_items, num_all_items)
-
-        return user_emb, item_emb, attention_probabilities, replacement_item_embeddings, item_emb_distances
+        return user_emb, item_emb, item_emb_distances, attention_probabilities, replacement_item_embeddings

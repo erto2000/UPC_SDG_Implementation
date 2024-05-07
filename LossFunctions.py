@@ -19,6 +19,7 @@ def selection_module_loss(user_emb, item_emb, attention_probabilities):
 # privacy_preference: tensor of privacy preferences, shape: (batch_size)
 # mask: tensor of mask for padding, shape: (batch_size, num_items)
 def generation_module_loss(user_emb, item_emb, replacement_item_emb, item_emb_distances, privacy_preference, mask=None):
+    # PRIVACY LOSS
     # Maximum and minimum of distances
     min_distances = torch.min(item_emb_distances, dim=2).values  # shape: (batch_size, num_items)
     max_distances = torch.max(item_emb_distances, dim=2).values  # shape: (batch_size, num_items)
@@ -38,23 +39,24 @@ def generation_module_loss(user_emb, item_emb, replacement_item_emb, item_emb_di
 
     privacy_loss = privacy_loss.sum()
 
+    # UTILITY LOSS
     # Take the dot product of user embeddings and item embeddings
     user_item_distances = torch.einsum('ijk,ijk->ij', user_emb.unsqueeze(1), item_emb)  # shape: (batch_size, num_items)
 
     # Apply the sigmoid function
-    probs = torch.sigmoid(user_item_distances)
+    utility_loss = torch.sigmoid(user_item_distances)
 
     # Compute the negative log of the probabilities
-    log_probs = -torch.log(probs + 1e-10)  # Adding a small value to avoid log(0)
+    utility_loss = -torch.log(utility_loss + 1e-10)  # Adding a small value to avoid log(0)
 
     # Apply mask if provided
     if mask is not None:
-        log_probs = log_probs * mask
+        utility_loss = utility_loss * mask
 
     # Sum over all user-item pairs
-    utility_loss = log_probs.sum()
+    utility_loss = utility_loss.sum()
 
-    return privacy_loss + utility_loss
+    return privacy_loss, utility_loss
 
 
 
