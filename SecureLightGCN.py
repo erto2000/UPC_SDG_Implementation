@@ -30,8 +30,14 @@ class SecureLightGCN(nn.Module):
     # user_indices: tensor of user indices, shape: (batch_size)
     # interacted_item_indices: tensor of interacted item indices, shape: (batch_size, num_items)
     # privacy_preferences: tensor of privacy preferences, shape: (batch_size)
-    # mask: tensor of mask for padding, shape: (batch_size, num_items
-    # Returns user_emb, item_emb, item_emb_distances, attention_probabilities, replacement_item_embeddings
+    # mask: tensor of mask for padding, shape: (batch_size, num_items)
+    # Returns:
+    # user_emb, shape: (batch_size, embedding_dim)
+    # item_emb, shape: (batch_size, num_items, embedding_dim)
+    # item_emb_distances, shape: (batch_size, num_items, num_all_items)
+    # attention_probabilities, shape: (batch_size, num_items)
+    # replacement_item_embeddings, shape: (batch_size, num_items, embedding_dim)
+    # replacement_item_indices, shape: (batch_size, num_items)
     def forward(self, user_indices, interacted_item_indices, privacy_preferences, mask=None):
         # SELECTION MODULE
         # Get initial embeddings
@@ -78,4 +84,13 @@ class SecureLightGCN(nn.Module):
         hard_similarity_score = F.gumbel_softmax(similarity_score, dim=-1, hard=True)  # shape: (batch_size, num_items, num_all_items)
         replacement_item_embeddings = torch.matmul(hard_similarity_score, self.item_embedding.weight)  # shape: (batch_size, num_items, embedding_dim)
 
-        return user_emb, item_emb, item_emb_distances, attention_probabilities, replacement_item_embeddings
+        # Get the id of the most similar item
+        _, replacement_item_indices = torch.max(hard_similarity_score, dim=-1)  # shape: (batch_size, num_items)
+
+        return user_emb, item_emb, item_emb_distances, attention_probabilities, replacement_item_embeddings, replacement_item_indices
+
+
+    def get_closest_user_id(self, user_emb):
+        user_item_distances = torch.matmul(user_emb, self.item_embedding.weight.T)  # shape: (batch_size, num_items)
+        _, closest_user_id = torch.max(user_item_distances, dim=1)
+        return closest_user_id
