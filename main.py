@@ -1,23 +1,29 @@
 from DataLoader import load_data, get_user_item_interaction, UserItemDataset, collate_fn
-from SecureLightGCN import SecureLightGCN
+from UPC_SDG import upc_sdg
 import LossFunctions
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import os
 
 # Constants
-skip_training = True
-saved_model_path = 'models/secure_light_gcn.pth'
-dataset_path = 'data/clothing/data.txt'
+skip_training = False
+saved_model_path = 'models/upc_sdg.pth'
+dataset_path = 'data/clothing_data.txt'
+embeddings_path = 'embeddings/clothing-64.pth.tar'
 replacement_ratio = 0.5
 privacy_preference = 0.5
-embedding_dim = 32
-num_epochs = 50
-batch_size = 4
+embedding_dim = 64
+num_epochs = 5
+batch_size = 128
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load user and item embeddings
+embeddings = torch.load(embeddings_path)
+user_embeddings = embeddings['embedding_user.weight']
+item_embeddings = embeddings['embedding_item.weight']
 
 # Load training data
 data = load_data(dataset_path)
@@ -33,7 +39,7 @@ train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_
 test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
 # Initialize the model
-model = SecureLightGCN(user_id_count, item_id_count, embedding_dim).to(device)
+model = upc_sdg(user_id_count, item_id_count, embedding_dim).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # Check if model exists and load
@@ -70,8 +76,9 @@ if not skip_training:
 
             # Calculate the loss
             selection_module_loss = LossFunctions.selection_module_loss(user_emb, item_emb, attention_probabilities)
-            generation_module_privacy_loss, generation_module_utility_loss = LossFunctions.generation_module_loss(user_emb, item_emb, replacement_item_embeddings, item_emb_distances, privacy_preferences, mask)
-            loss = 20000 * selection_module_loss + 50 * generation_module_privacy_loss + generation_module_utility_loss
+            # generation_module_privacy_loss, generation_module_utility_loss = LossFunctions.generation_module_loss(user_emb, item_emb, replacement_item_embeddings, item_emb_distances, privacy_preferences, mask)
+            # loss = selection_module_loss + generation_module_privacy_loss + generation_module_utility_loss
+            loss = selection_module_loss
 
             # Backward pass
             loss.backward()
