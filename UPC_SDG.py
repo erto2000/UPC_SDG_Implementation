@@ -4,27 +4,33 @@ import torch.nn.functional as F
 
 
 class upc_sdg(nn.Module):
-    def __init__(self, num_users, num_items, embedding_dim):
+    def __init__(self, user_embeddings, item_embeddings):
         super(upc_sdg, self).__init__()
-        self.num_users = num_users
-        self.num_items = num_items
-        self.embedding_dim = embedding_dim
 
         # User and item embeddings
-        self.user_embedding = nn.Embedding(num_users, embedding_dim)
-        self.item_embedding = nn.Embedding(num_items, embedding_dim)
+        self.user_embedding = user_embeddings
+        self.item_embedding = item_embeddings
+
+        embedding_dim = user_embeddings.shape[1]
 
         self.selection_layer = nn.Sequential(
-            nn.Linear(2 * self.embedding_dim, self.embedding_dim),
-            nn.Linear(self.embedding_dim, 1),
+            nn.Linear(2 * embedding_dim, 4 * embedding_dim),
+            nn.ReLU(),
+            nn.Linear(4 * embedding_dim, 4 * embedding_dim),
+            nn.ReLU(),
+            nn.Linear(4 * embedding_dim, 2 * embedding_dim),
+            nn.ReLU(),
+            nn.Linear(2 * embedding_dim, 2 * embedding_dim),
+            nn.ReLU(),
+            nn.Linear(2 * embedding_dim, embedding_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_dim, 1),
             nn.LeakyReLU()
         )
 
-        self.generation_layer = nn.Linear((2 * self.embedding_dim) + 1, self.embedding_dim)
-
-        # Initialize embeddings with normal distribution
-        nn.init.normal_(self.user_embedding.weight, std=0.1)
-        nn.init.normal_(self.item_embedding.weight, std=0.1)
+        self.generation_layer = nn.Linear((2 * embedding_dim) + 1, embedding_dim)
 
     # Forward pass
     # user_indices: tensor of user indices, shape: (batch_size)
@@ -41,11 +47,11 @@ class upc_sdg(nn.Module):
     def forward(self, user_indices, interacted_item_indices, privacy_preferences, mask=None):
         # SELECTION MODULE
         # Get initial embeddings
-        user_emb = self.user_embedding(user_indices)  # shape: (batch_size, embedding_dim)
-        item_emb = self.item_embedding(interacted_item_indices)  # shape: (batch_size, num_items, embedding_dim)
+        user_emb = self.user_embedding[user_indices]  # shape: (batch_size, embedding_dim)
+        item_emb = self.item_embedding[interacted_item_indices]  # shape: (batch_size, num_items, embedding_dim)
 
         # Calculate item distances (cosine similarity of item_emb with every other item embeddings)
-        item_emb_distances = torch.matmul(item_emb, self.item_embedding.weight.T)  # shape: (batch_size, num_items, num_all_items)
+        item_emb_distances = torch.matmul(item_emb, self.item_embedding.T)  # shape: (batch_size, num_items, num_all_items)
 
         # Combine user_emb with each item_emb
         user_emb_expanded = user_emb.unsqueeze(1)  # Add 1 to the middle for broadcasting, shape: (batch_size, 1, embedding_dim)
@@ -71,7 +77,7 @@ class upc_sdg(nn.Module):
 
         # Generate latent feature
         latent_feature = self.generation_layer(privacy_combined_emb)  # shape: (batch_size, num_items, embedding_dim)
-        similarity_score = torch.matmul(latent_feature, self.item_embedding.weight.T)  # shape: (batch_size, num_items, num_all_items)
+        similarity_score = torch.matmul(latent_feature, self.item_embedding.T)  # shape: (batch_size, num_items, num_all_items)
 
         # Suppress the similarity score of interacted items
         item_mask = torch.zeros_like(similarity_score)
@@ -82,7 +88,7 @@ class upc_sdg(nn.Module):
 
         # Most similar item selection (Item generation)
         hard_similarity_score = F.gumbel_softmax(similarity_score, dim=-1, hard=True)  # shape: (batch_size, num_items, num_all_items)
-        replacement_item_embeddings = torch.matmul(hard_similarity_score, self.item_embedding.weight)  # shape: (batch_size, num_items, embedding_dim)
+        replacement_item_embeddings = torch.matmul(hard_similarity_score, self.item_embedding)  # shape: (batch_size, num_items, embedding_dim)
 
         # Get the id of the most similar item
         _, replacement_item_indices = torch.max(hard_similarity_score, dim=-1)  # shape: (batch_size, num_items)
@@ -91,6 +97,6 @@ class upc_sdg(nn.Module):
 
 
     def get_closest_user_id(self, user_emb):
-        user_item_distances = torch.matmul(user_emb, self.item_embedding.weight.T)  # shape: (batch_size, num_items)
+        user_item_distances = torch.matmul(user_emb, self.item_embedding.T)  # shape: (batch_size, num_items)
         _, closest_user_id = torch.max(user_item_distances, dim=1)
         return closest_user_id

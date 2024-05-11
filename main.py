@@ -10,12 +10,11 @@ import os
 skip_training = False
 saved_model_path = 'models/upc_sdg.pth'
 dataset_path = 'data/clothing_data.txt'
-embeddings_path = 'embeddings/clothing-64.pth.tar'
+embeddings_path = 'data/clothing_embeddings_64.pth.tar'
 replacement_ratio = 0.5
 privacy_preference = 0.5
-embedding_dim = 64
 num_epochs = 5
-batch_size = 128
+batch_size = 32
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -35,11 +34,10 @@ print("Number of items:", item_id_count)
 
 # Create DataLoader
 dataset = UserItemDataset(user_ids, interacted_item_ids, [privacy_preference] * len(user_ids))
-train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
 # Initialize the model
-model = upc_sdg(user_id_count, item_id_count, embedding_dim).to(device)
+model = upc_sdg(user_embeddings, item_embeddings).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # Check if model exists and load
@@ -50,6 +48,7 @@ if os.path.isfile(saved_model_path):
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     print("Model loaded successfully.")
 else:
+    skip_training = False
     print("No saved model found. Training from scratch.")
 
 # Train the model
@@ -57,7 +56,7 @@ if not skip_training:
     # Iterate over each epoch
     for epoch in range(num_epochs):
         # Wrap data loader with tqdm for a progress bar
-        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}', leave=True)
+        progress_bar = tqdm(data_loader, desc=f'Epoch {epoch+1}/{num_epochs}', leave=True)
 
         # Iterate over each batch
         total_loss = 0
@@ -91,8 +90,8 @@ if not skip_training:
             progress_bar.set_postfix({'loss': loss.item()})
 
         # Calculate the average loss for the epoch
-        average_loss = total_loss / len(train_loader)
         progress_bar.close()
+        average_loss = total_loss / len(data_loader)
         print(f"Epoch {epoch+1}, Average Loss: {average_loss}")
 
     # If save file already exists, add number to the end
@@ -116,7 +115,7 @@ if not skip_training:
 
 # Test the model
 # Wrap data loader with tqdm for a progress bar
-progress_bar = tqdm(test_loader, desc=f'Testing all data', leave=True)
+progress_bar = tqdm(data_loader, desc=f'Testing all data', leave=True)
 
 # Iterate over each batch
 total_accuracy = 0
@@ -167,7 +166,7 @@ for user_ids_batch, items_ids_batch, privacy_preferences, mask in progress_bar:
     accuracy = correct.sum().item() / batch_size
     total_accuracy += accuracy
 
-print(f"Average Accuracy: {total_accuracy / len(test_loader)}")
+print(f"Average Accuracy: {total_accuracy / len(data_loader)}")
 
 
 
