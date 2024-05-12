@@ -14,20 +14,13 @@ class upc_sdg(nn.Module):
         embedding_dim = user_embeddings.shape[1]
 
         self.selection_layer = nn.Sequential(
-            nn.Linear(2 * embedding_dim, 4 * embedding_dim),
-            nn.ReLU(),
-            nn.Linear(4 * embedding_dim, 4 * embedding_dim),
-            nn.ReLU(),
-            nn.Linear(4 * embedding_dim, 2 * embedding_dim),
-            nn.ReLU(),
-            nn.Linear(2 * embedding_dim, 2 * embedding_dim),
-            nn.ReLU(),
-            nn.Linear(2 * embedding_dim, embedding_dim),
-            nn.ReLU(),
-            nn.Linear(embedding_dim, embedding_dim),
-            nn.ReLU(),
-            nn.Linear(embedding_dim, 1),
+            nn.Linear(2 * embedding_dim, 1),
             nn.LeakyReLU()
+        )
+
+        self.feature_transform = torch.nn.Sequential(
+            torch.nn.BatchNorm1d(embedding_dim),
+            # torch.nn.Linear(embedding_dim, embedding_dim)
         )
 
         self.generation_layer = nn.Linear((2 * embedding_dim) + 1, embedding_dim)
@@ -40,18 +33,14 @@ class upc_sdg(nn.Module):
     # Returns:
     # user_emb, shape: (batch_size, embedding_dim)
     # item_emb, shape: (batch_size, num_items, embedding_dim)
-    # item_emb_distances, shape: (batch_size, num_items, num_all_items)
     # attention_probabilities, shape: (batch_size, num_items)
-    # replacement_item_embeddings, shape: (batch_size, num_items, embedding_dim)
     # replacement_item_indices, shape: (batch_size, num_items)
+    # replacement_item_embeddings, shape: (batch_size, num_items, embedding_dim)
     def forward(self, user_indices, interacted_item_indices, privacy_preferences, mask=None):
         # SELECTION MODULE
         # Get initial embeddings
         user_emb = self.user_embedding[user_indices]  # shape: (batch_size, embedding_dim)
         item_emb = self.item_embedding[interacted_item_indices]  # shape: (batch_size, num_items, embedding_dim)
-
-        # Calculate item distances (cosine similarity of item_emb with every other item embeddings)
-        item_emb_distances = torch.matmul(item_emb, self.item_embedding.T)  # shape: (batch_size, num_items, num_all_items)
 
         # Combine user_emb with each item_emb
         user_emb_expanded = user_emb.unsqueeze(1)  # Add 1 to the middle for broadcasting, shape: (batch_size, 1, embedding_dim)
@@ -65,7 +54,6 @@ class upc_sdg(nn.Module):
             attention = attention.masked_fill(~mask, float('-inf'))  # Replace padding attention with negative infinity
 
         # Subtract max for numerical stability before softmax
-        # max_val = torch.max(attention, dim=1, keepdim=True).values  # Calculate max per batch for stability
         attention_probabilities = F.softmax(attention, dim=1)  # Apply softmax across items within the batch
 
 
@@ -93,10 +81,74 @@ class upc_sdg(nn.Module):
         # Get the id of the most similar item
         _, replacement_item_indices = torch.max(hard_similarity_score, dim=-1)  # shape: (batch_size, num_items)
 
-        return user_emb, item_emb, item_emb_distances, attention_probabilities, replacement_item_embeddings, replacement_item_indices
+        return user_emb, item_emb, attention_probabilities, replacement_item_indices, replacement_item_embeddings
 
 
-    def get_closest_user_id(self, user_emb):
-        user_item_distances = torch.matmul(user_emb, self.item_embedding.T)  # shape: (batch_size, num_items)
+    # Get the closest user id to the given embedding
+    # embedding: tensor of embeddings, shape: (batch_size, embedding_dim)
+    def get_closest_user_id(self, embedding):
+        embedding = self.feature_transform(embedding)
+        user_item_distances = torch.matmul(embedding, self.item_embedding.T)  # shape: (batch_size, num_items)
         _, closest_user_id = torch.max(user_item_distances, dim=1)
         return closest_user_id
+
+
+    # Loss function for the selection module
+    # user_emb: tensor of user embeddings, shape: (batch_size, embedding_dim)
+    # item_emb: tensor of item embeddings, shape: (batch_size, num_items, embedding_dim)
+    # attention_probabilities: tensor of attention probabilities, shape: (batch_size, num_items)
+    def selection_module_loss(self, user_emb, item_emb, attention_probabilities):
+        weighted_sum = torch.sum(item_emb * attention_probabilities.unsqueeze(-1), dim=1)  # shape: (batch_size, embedding_dim)
+        weighted_sum = self.feature_transform(weighted_sum)
+        loss = torch.nn.MSELoss()(weighted_sum, user_emb)
+        return loss
+
+
+    # Loss function for the generation module
+    # user_emb: tensor of user embeddings, shape: (batch_size, embedding_dim)
+    # item_emb: tensor of item embeddings, shape: (batch_size, num_items, embedding_dim)
+    # replacement_item_emb: tensor of replacement item embeddings, shape: (batch_size, num_items, embedding_dim)
+    # privacy_preference: tensor of privacy preferences, shape: (batch_size)
+    # mask: tensor of mask for padding, shape: (batch_size, num_items)
+    def generation_module_loss(self, user_emb, item_emb, replacement_item_emb, privacy_preference, mask=None):
+        # PRIVACY LOSS
+        # Calculate item distances (cosine similarity of replacement_item_embeddings with every other item embeddings)
+        replacement_item_emb_distances = torch.matmul(replacement_item_emb, self.item_embedding.T)  # shape: (batch_size, num_items, num_all_items)
+
+        # Maximum and minimum of distances
+        min_distance = torch.min(replacement_item_emb_distances, dim=2).values  # shape: (batch_size, num_items)
+        max_distance = torch.max(replacement_item_emb_distances, dim=2).values  # shape: (batch_size, num_items)
+
+        # Take the dot product of item embeddings and replacement item embeddings
+        item_emb_distance = torch.einsum('ijk,ijk->ij', item_emb, replacement_item_emb)  # shape: (batch_size, num_items)
+
+        # Calculate the similarity based on the distances
+        similarity = (item_emb_distance - min_distance) / (max_distance - min_distance)  # shape: (batch_size, num_items)
+
+        privacy_loss = similarity - privacy_preference.unsqueeze(-1)  # shape: (batch_size, num_items)
+        privacy_loss = torch.clamp(privacy_loss, min=0)  # Ensure non-negativity
+
+        # Apply mask if provided
+        if mask is not None:
+            privacy_loss = privacy_loss * mask
+
+        privacy_loss = privacy_loss.mean()
+
+        # UTILITY LOSS
+        # Take the dot product of user embeddings and item embeddings
+        user_item_distances = torch.einsum('ijk,ijk->ij', user_emb.unsqueeze(1), replacement_item_emb)  # shape: (batch_size, num_items)
+
+        # Apply the sigmoid function
+        utility_loss = torch.sigmoid(user_item_distances)
+
+        # Compute the negative log of the probabilities
+        utility_loss = -torch.log(utility_loss + 1e-10)  # Adding a small value to avoid log(0)
+
+        # Apply mask if provided
+        if mask is not None:
+            utility_loss = utility_loss * mask
+
+        # Sum over all user-item pairs
+        utility_loss = utility_loss.mean()
+
+        return privacy_loss, utility_loss

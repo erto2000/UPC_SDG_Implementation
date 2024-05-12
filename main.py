@@ -1,6 +1,5 @@
 from DataLoader import load_data, get_user_item_interaction, UserItemDataset, collate_fn
 from UPC_SDG import upc_sdg
-import LossFunctions
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -11,10 +10,10 @@ skip_training = False
 saved_model_path = 'models/upc_sdg.pth'
 dataset_path = 'data/clothing_data.txt'
 embeddings_path = 'data/clothing_embeddings_64.pth.tar'
-replacement_ratio = 0.5
+replacement_ratio = 0.1
 privacy_preference = 0.5
 num_epochs = 5
-batch_size = 32
+batch_size = 128
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,15 +40,18 @@ model = upc_sdg(user_embeddings, item_embeddings).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # Check if model exists and load
-if os.path.isfile(saved_model_path):
-    print("Loading saved model...")
-    checkpoint = torch.load(saved_model_path)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    print("Model loaded successfully.")
+if skip_training:
+    if os.path.isfile(saved_model_path):
+        print("Loading saved model...")
+        checkpoint = torch.load(saved_model_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("Model loaded successfully.")
+    else:
+        skip_training = False
+        print("No saved model found. Training from scratch.")
 else:
-    skip_training = False
-    print("No saved model found. Training from scratch.")
+    print("Training from scratch.")
 
 # Train the model
 if not skip_training:
@@ -60,6 +62,9 @@ if not skip_training:
 
         # Iterate over each batch
         total_loss = 0
+        total_selection_module_loss = 0
+        total_generation_module_privacy_loss = 0
+        total_generation_module_utility_loss = 0
         for user_ids_batch, items_ids_batch, privacy_preferences, mask in progress_bar:
             # Move data to device
             user_ids_batch = user_ids_batch.to(device)
@@ -71,13 +76,12 @@ if not skip_training:
             optimizer.zero_grad()
 
             # Forward pass
-            user_emb, item_emb, item_emb_distances, attention_probabilities, replacement_item_embeddings, replacement_item_indices = model(user_ids_batch, items_ids_batch, privacy_preferences, mask)
+            user_emb, item_emb, attention_probabilities, replacement_item_indices, replacement_item_embeddings = model(user_ids_batch, items_ids_batch, privacy_preferences, mask)
 
             # Calculate the loss
-            selection_module_loss = LossFunctions.selection_module_loss(user_emb, item_emb, attention_probabilities)
-            # generation_module_privacy_loss, generation_module_utility_loss = LossFunctions.generation_module_loss(user_emb, item_emb, replacement_item_embeddings, item_emb_distances, privacy_preferences, mask)
-            # loss = selection_module_loss + generation_module_privacy_loss + generation_module_utility_loss
-            loss = selection_module_loss
+            selection_module_loss = model.selection_module_loss(user_emb, item_emb, attention_probabilities)
+            generation_module_privacy_loss, generation_module_utility_loss = model.generation_module_loss(user_emb, item_emb, replacement_item_embeddings, privacy_preferences, mask)
+            loss = selection_module_loss + generation_module_privacy_loss + generation_module_utility_loss
 
             # Backward pass
             loss.backward()
@@ -85,6 +89,9 @@ if not skip_training:
 
             # Accumulate the total loss
             total_loss += loss.item()
+            total_selection_module_loss += selection_module_loss.item()
+            total_generation_module_privacy_loss += generation_module_privacy_loss.item()
+            total_generation_module_utility_loss += generation_module_utility_loss.item()
 
             # Update the progress bar with the current loss
             progress_bar.set_postfix({'loss': loss.item()})
@@ -92,18 +99,18 @@ if not skip_training:
         # Calculate the average loss for the epoch
         progress_bar.close()
         average_loss = total_loss / len(data_loader)
-        print(f"Epoch {epoch+1}, Average Loss: {average_loss}")
+        print(f"Epoch {epoch+1}, Average Loss: {average_loss}, Selection Module Loss: {total_selection_module_loss / len(data_loader)}, Generation Module Privacy Loss: {total_generation_module_privacy_loss / len(data_loader)}, Generation Module Utility Loss: {total_generation_module_utility_loss / len(data_loader)}")
 
     # If save file already exists, add number to the end
-    if os.path.isfile(saved_model_path):
-        i = 1
-        while os.path.isfile(saved_model_path):
-            saved_model_path = saved_model_path.replace('.pth', f'_{i}.pth')
-            i += 1
+    i = 1
+    new_saved_model_path = saved_model_path
+    while os.path.isfile(new_saved_model_path):
+        new_saved_model_path = saved_model_path.replace('.pth', f'_{i}.pth')
+        i += 1
 
     # If directory does not exist, create it
-    if not os.path.exists(os.path.dirname(saved_model_path)):
-        os.makedirs(os.path.dirname(saved_model_path))
+    if not os.path.exists(os.path.dirname(new_saved_model_path)):
+        os.makedirs(os.path.dirname(new_saved_model_path))
 
     # Save the model after training is complete
     torch.save({
@@ -127,7 +134,7 @@ for user_ids_batch, items_ids_batch, privacy_preferences, mask in progress_bar:
     mask = mask.to(device)
 
     # Forward pass
-    _, _, _, attention_probabilities, _, replacement_item_indices = model(user_ids_batch, items_ids_batch, privacy_preferences, mask)
+    _, _, attention_probabilities, replacement_item_indices, _ = model(user_ids_batch, items_ids_batch, privacy_preferences, mask)
 
     # Number of items to replace based on the replacement ratio
     item_counts = mask.sum(dim=1) # shape: (batch_size)
@@ -151,7 +158,7 @@ for user_ids_batch, items_ids_batch, privacy_preferences, mask in progress_bar:
     sorted_item_indices[replacement_mask] = sorted_replacement_item_indices[replacement_mask]
 
     # Forward pass again with the updated item indices
-    _, item_emb, _, attention_probabilities, _, _ = model(user_ids_batch, sorted_item_indices, privacy_preferences, mask)
+    _, item_emb, attention_probabilities, _, _ = model(user_ids_batch, sorted_item_indices, privacy_preferences, mask)
 
     # Calculate feature vector based on attention probabilities
     weighted_sum = torch.sum(item_emb * attention_probabilities.unsqueeze(-1), dim=1)  # shape: (batch_size, embedding_dim)
