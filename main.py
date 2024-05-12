@@ -173,6 +173,9 @@ for user_ids_batch, items_ids_batch, privacy_preferences, mask in progress_bar:
     accuracy = correct.sum().item() / batch_size
     total_accuracy += accuracy
 
+    # Update the progress bar with the current accuracy
+    progress_bar.set_postfix({'accuracy': accuracy})
+
 print(f"Average Accuracy: {total_accuracy / len(data_loader)}")
 
 
