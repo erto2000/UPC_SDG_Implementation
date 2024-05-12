@@ -6,7 +6,7 @@ from tqdm import tqdm
 import os
 
 # Constants
-skip_training = False
+skip_training = True
 saved_model_path = 'models/upc_sdg.pth'
 dataset_path = 'data/clothing_data.txt'
 embeddings_path = 'data/clothing_embeddings_64.pth.tar'

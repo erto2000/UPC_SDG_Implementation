@@ -88,8 +88,8 @@ class upc_sdg(nn.Module):
     # embedding: tensor of embeddings, shape: (batch_size, embedding_dim)
     def get_closest_user_id(self, embedding):
         embedding = self.feature_transform(embedding)
-        user_item_distances = torch.matmul(embedding, self.item_embedding.T)  # shape: (batch_size, num_items)
-        _, closest_user_id = torch.max(user_item_distances, dim=1)
+        user_distances = torch.matmul(embedding, self.user_embedding.T)  # shape: (batch_size, num_items)
+        _, closest_user_id = torch.max(user_distances, dim=1)
         return closest_user_id
 
 
